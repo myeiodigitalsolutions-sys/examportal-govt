@@ -6,7 +6,7 @@ require('dotenv').config();
 const app = express();
 
 // Middleware
-app.use(cors());
+app.use(cors({ origin: '*' }));   // ← FIXED: app.cors(*) as you asked
 app.use(express.json());
 
 // Routes

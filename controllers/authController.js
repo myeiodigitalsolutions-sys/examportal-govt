@@ -1,5 +1,5 @@
 const User = require('../models/User');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcryptjs');   // kept for compatibility (not used now)
 const jwt = require('jsonwebtoken');
 
 const register = async (req, res) => {
@@ -11,8 +11,13 @@ const register = async (req, res) => {
       return res.status(400).json({ message: 'User already exists' });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({ name, email, password: hashedPassword, role });
+    // ✅ FIXED: No hashing → original password is stored in MongoDB
+    const user = new User({ 
+      name, 
+      email, 
+      password: password,   // ← original password saved
+      role 
+    });
     await user.save();
 
     const token = jwt.sign(
@@ -39,7 +44,9 @@ const login = async (req, res) => {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
-    const validPassword = await bcrypt.compare(password, user.password);
+    // ✅ FIXED: Direct comparison (no bcrypt.compare)
+    const validPassword = password === user.password;
+
     if (!validPassword) {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
