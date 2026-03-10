@@ -10,11 +10,7 @@ const submitExam = async (req, res) => {
       return res.status(404).json({ message: 'Exam not found' });
     }
 
-    if (!exam.isActive) {
-      return res.status(400).json({ message: 'This exam is no longer active' });
-    }
-
-    // Check if student already submitted
+    // Check if already submitted
     const existingResult = await Result.findOne({
       student: req.user.id,
       exam: exam._id
@@ -26,37 +22,82 @@ const submitExam = async (req, res) => {
         result: {
           score: existingResult.score,
           totalQuestions: existingResult.totalQuestions,
-          percentage: existingResult.percentage
+          percentage: existingResult.percentage,
+          topicWiseScores: existingResult.topicWiseScores
         }
       });
     }
 
-    // Validate answers array
-    if (!answers || !Array.isArray(answers) || answers.length === 0) {
-      return res.status(400).json({ message: 'Invalid answers format' });
-    }
+    // Flatten all questions with topic information (in the order they were presented)
+    const allQuestions = [];
+    exam.topics.forEach((topic, topicIndex) => {
+      topic.questions.forEach((question, questionIndex) => {
+        allQuestions.push({
+          topicIndex,
+          topicName: topic.name,
+          questionIndex,
+          correctOption: question.correctOption
+        });
+      });
+    });
 
-    // Calculate score using original indices
+    // Calculate score and prepare answer details
     let score = 0;
-    answers.forEach((answer) => {
-      const originalIndex = answer.questionIndex;
-      if (originalIndex >= 0 && originalIndex < exam.questions.length) {
-        if (exam.questions[originalIndex].correctOption === answer.selectedOption) {
-          score++;
-        }
+    const answerDetails = [];
+    const topicWiseStats = {};
+
+    // Initialize topic-wise stats
+    exam.topics.forEach((topic, topicIndex) => {
+      topicWiseStats[topicIndex] = {
+        topicName: topic.name,
+        score: 0,
+        totalQuestions: topic.questions.length,
+        questions: []
+      };
+    });
+
+    answers.forEach(answer => {
+      // Since questions are presented in topic order, the questionOrder array
+      // is just [0,1,2,3,...] because we're not shuffling across topics
+      const questionInfo = allQuestions[answer.questionIndex];
+      const isCorrect = answer.selectedOption === questionInfo.correctOption;
+      
+      if (isCorrect && answer.selectedOption !== -1) score++;
+      
+      answerDetails.push({
+        questionIndex: answer.questionIndex,
+        selectedOption: answer.selectedOption,
+        isCorrect: isCorrect && answer.selectedOption !== -1,
+        topicIndex: questionInfo.topicIndex,
+        topicName: questionInfo.topicName
+      });
+
+      // Update topic-wise stats
+      if (isCorrect && answer.selectedOption !== -1) {
+        topicWiseStats[questionInfo.topicIndex].score++;
       }
     });
 
-    const percentage = (score / exam.questions.length) * 100;
+    // Calculate topic-wise percentages
+    const topicWiseScores = Object.values(topicWiseStats).map(topic => ({
+      topicName: topic.topicName,
+      score: topic.score,
+      totalQuestions: topic.totalQuestions,
+      percentage: (topic.score / topic.totalQuestions) * 100
+    }));
+
+    const totalQuestions = allQuestions.length;
+    const percentage = (score / totalQuestions) * 100;
 
     const result = new Result({
       student: req.user.id,
       exam: exam._id,
-      answers,
-      questionOrder: questionOrder || [],
       score,
-      totalQuestions: exam.questions.length,
-      percentage
+      totalQuestions,
+      percentage,
+      topicWiseScores,
+      answers: answerDetails,
+      questionOrder: Array.from({ length: totalQuestions }, (_, i) => i) // Simple order
     });
 
     await result.save();
@@ -64,36 +105,33 @@ const submitExam = async (req, res) => {
     res.json({
       message: 'Exam submitted successfully',
       score,
-      totalQuestions: exam.questions.length,
-      percentage: percentage.toFixed(2)
+      totalQuestions,
+      percentage,
+      topicWiseScores
     });
   } catch (error) {
-    // Handle duplicate key error
-    if (error.code === 11000) {
-      return res.status(400).json({ message: 'You have already submitted this exam' });
-    }
     res.status(500).json({ message: error.message });
   }
 };
 
 const getRankings = async (req, res) => {
   try {
-    const rankings = await Result.find({ exam: req.params.examId })
-      .populate('student', 'name email')
-      .sort({ percentage: -1, completedAt: 1 })
-      .limit(10);
-
-    const formattedRankings = rankings.map((result, index) => ({
+    const results = await Result.find({ exam: req.params.examId })
+      .populate('student', 'name')
+      .sort({ percentage: -1, score: -1, completedAt: 1 })
+      .limit(50);
+    
+    const rankings = results.map((result, index) => ({
       rank: index + 1,
-      studentName: result.student?.name || 'Unknown',
-      email: result.student?.email,
+      studentName: result.student.name,
       score: result.score,
       totalQuestions: result.totalQuestions,
       percentage: result.percentage.toFixed(2),
+      topicWiseScores: result.topicWiseScores,
       completedAt: result.completedAt
     }));
-
-    res.json(formattedRankings);
+    
+    res.json(rankings);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -102,9 +140,9 @@ const getRankings = async (req, res) => {
 const getMyResults = async (req, res) => {
   try {
     const results = await Result.find({ student: req.user.id })
-      .populate('exam', 'title description')
+      .populate('exam', 'title description duration topics')
       .sort({ completedAt: -1 });
-
+    
     res.json(results);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -118,18 +156,28 @@ const checkExamStatus = async (req, res) => {
       exam: req.params.examId
     });
 
-    res.json({
-      completed: !!result,
-      result: result ? {
-        score: result.score,
-        totalQuestions: result.totalQuestions,
-        percentage: result.percentage,
-        completedAt: result.completedAt
-      } : null
-    });
+    if (result) {
+      return res.json({
+        completed: true,
+        result: {
+          score: result.score,
+          totalQuestions: result.totalQuestions,
+          percentage: result.percentage,
+          topicWiseScores: result.topicWiseScores,
+          completedAt: result.completedAt
+        }
+      });
+    }
+
+    res.json({ completed: false });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-module.exports = { submitExam, getRankings, getMyResults, checkExamStatus };
+module.exports = { 
+  submitExam, 
+  getRankings, 
+  getMyResults, 
+  checkExamStatus 
+};

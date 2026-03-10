@@ -5,11 +5,27 @@ const { shuffleArray } = require('../utils/shuffle');
 const getAllExams = async (req, res) => {
   try {
     const exams = await Exam.find({ isActive: true })
-      .select('-questions.correctOption')
+      .select('-topics.questions.correctOption')
       .populate('createdBy', 'name')
       .sort({ createdAt: -1 });
     
-    res.json(exams);
+    // Format response to show topic counts
+    const formattedExams = exams.map(exam => ({
+      _id: exam._id,
+      title: exam.title,
+      description: exam.description,
+      duration: exam.duration,
+      topics: exam.topics.map(t => ({ 
+        name: t.name, 
+        questionCount: t.questions.length 
+      })),
+      totalQuestions: exam.topics.reduce((sum, t) => sum + t.questions.length, 0),
+      createdBy: exam.createdBy,
+      createdAt: exam.createdAt,
+      isActive: exam.isActive
+    }));
+    
+    res.json(formattedExams);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -41,28 +57,74 @@ const getExamById = async (req, res) => {
           score: existingResult.score,
           totalQuestions: existingResult.totalQuestions,
           percentage: existingResult.percentage,
+          topicWiseScores: existingResult.topicWiseScores,
           completedAt: existingResult.completedAt
         }
       });
     }
 
-    // Create randomized order for new attempt
-    const questionOrder = Array.from({ length: exam.questions.length }, (_, i) => i);
-    const shuffledOrder = shuffleArray(questionOrder);
-    
-    const randomizedQuestions = shuffledOrder.map(index => ({
-      question: exam.questions[index].question,
-      options: exam.questions[index].options,
-      originalIndex: index
-    }));
+    // Process each topic separately - shuffle questions WITHIN each topic
+    const randomizedQuestions = [];
+    const questionOrder = []; // This will store the order of questions as they appear
+    const allQuestionsInfo = [];
+
+    exam.topics.forEach((topic, topicIndex) => {
+      // Create array of indices for this topic's questions
+      const topicQuestionIndices = Array.from(
+        { length: topic.questions.length }, 
+        (_, i) => i
+      );
+      
+      // Shuffle the indices for this topic only
+      const shuffledTopicIndices = shuffleArray(topicQuestionIndices);
+      
+      // Add shuffled questions from this topic to the main list
+      shuffledTopicIndices.forEach((originalIndex, positionInTopic) => {
+        const question = topic.questions[originalIndex];
+        
+        randomizedQuestions.push({
+          question: question.question,
+          options: question.options,
+          topicName: topic.name,
+          topicIndex: topicIndex,
+          originalIndex: originalIndex,
+          displayTopicIndex: topicIndex, // Keep track of which topic this belongs to
+          displayOrderInTopic: positionInTopic // Order within the topic
+        });
+
+        // Store info for answer validation
+        allQuestionsInfo.push({
+          topicIndex,
+          topicName: topic.name,
+          originalIndex,
+          correctOption: question.correctOption
+        });
+      });
+
+      // Add topic separator in questionOrder (optional - for frontend tracking)
+      questionOrder.push({
+        topicName: topic.name,
+        questionCount: topic.questions.length,
+        startIndex: randomizedQuestions.length - topic.questions.length
+      });
+    });
+
+    // Create a flat list of question order for the frontend
+    const flatQuestionOrder = randomizedQuestions.map((_, index) => index);
 
     res.json({
       _id: exam._id,
       title: exam.title,
       description: exam.description,
       duration: exam.duration,
+      topics: exam.topics.map(t => ({ 
+        name: t.name, 
+        questionCount: t.questions.length 
+      })),
       questions: randomizedQuestions,
-      questionOrder: shuffledOrder
+      questionOrder: flatQuestionOrder, // Flat array for answer submission
+      topicOrder: questionOrder, // Topic grouping info for frontend
+      allQuestionsInfo
     });
   } catch (error) {
     res.status(500).json({ message: error.message });

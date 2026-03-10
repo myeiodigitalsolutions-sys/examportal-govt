@@ -20,47 +20,77 @@ const uploadExam = async (req, res) => {
     }
 
     const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
-    const data = xlsx.utils.sheet_to_json(sheet);
-
-    if (data.length === 0) {
-      return res.status(400).json({ message: 'Excel file is empty' });
+    const sheetNames = workbook.SheetNames;
+    
+    if (sheetNames.length === 0) {
+      return res.status(400).json({ message: 'Excel file has no sheets' });
     }
 
-    const questions = data.map((row, index) => {
-      // Validate each row
-      const question = row.Question || row.question;
-      const option1 = row.Option1 || row.option1;
-      const option2 = row.Option2 || row.option2;
-      const option3 = row.Option3 || row.option3;
-      const option4 = row.Option4 || row.option4;
-      const correctOption = parseInt(row.CorrectOption || row.correctOption);
+    const topics = [];
 
-      if (!question || !option1 || !option2 || !option3 || !option4 || !correctOption) {
-        throw new Error(`Invalid data at row ${index + 2}`);
+    // Process each sheet as a topic
+    for (const sheetName of sheetNames) {
+      const sheet = workbook.Sheets[sheetName];
+      const data = xlsx.utils.sheet_to_json(sheet);
+
+      if (data.length === 0) {
+        continue; // Skip empty sheets
       }
 
-      if (correctOption < 1 || correctOption > 4) {
-        throw new Error(`Correct option must be between 1-4 at row ${index + 2}`);
-      }
+      const questions = data.map((row, index) => {
+        // Validate each row (case-insensitive column names)
+        const question = row.Question || row.question || row.QUESTIONS || row.questions;
+        const option1 = row.Option1 || row.option1 || row.OPTION1;
+        const option2 = row.Option2 || row.option2 || row.OPTION2;
+        const option3 = row.Option3 || row.option3 || row.OPTION3;
+        const option4 = row.Option4 || row.option4 || row.OPTION4;
+        const correctOption = parseInt(row.CorrectOption || row.correctOption || row.CORRECTOPTION || row['Correct Option']);
 
-      return {
-        question,
-        options: [option1, option2, option3, option4],
-        correctOption: correctOption - 1 // Convert to 0-based index
-      };
-    });
+        if (!question || !option1 || !option2 || !option3 || !option4) {
+          throw new Error(`Missing question or options at row ${index + 2} in sheet "${sheetName}"`);
+        }
+
+        if (isNaN(correctOption) || correctOption < 1 || correctOption > 4) {
+          throw new Error(`Correct option must be between 1-4 at row ${index + 2} in sheet "${sheetName}"`);
+        }
+
+        return {
+          question: String(question).trim(),
+          options: [
+            String(option1).trim(),
+            String(option2).trim(),
+            String(option3).trim(),
+            String(option4).trim()
+          ],
+          correctOption: correctOption - 1 // Convert to 0-based index
+        };
+      });
+
+      if (questions.length > 0) {
+        topics.push({
+          name: sheetName,
+          questions
+        });
+      }
+    }
+
+    if (topics.length === 0) {
+      return res.status(400).json({ message: 'No valid questions found in any sheet' });
+    }
 
     const exam = new Exam({
       title,
       description,
       duration: parseInt(duration),
-      questions,
+      topics,
       createdBy: req.user.id
     });
 
     await exam.save();
+    
+    // Calculate total questions across all topics
+    const totalQuestions = topics.reduce((sum, topic) => sum + topic.questions.length, 0);
+
     res.status(201).json({ 
       message: 'Exam uploaded successfully', 
       exam: {
@@ -68,7 +98,8 @@ const uploadExam = async (req, res) => {
         title: exam.title,
         description: exam.description,
         duration: exam.duration,
-        questionsCount: exam.questions.length
+        topics: topics.map(t => ({ name: t.name, questionCount: t.questions.length })),
+        totalQuestions
       } 
     });
   } catch (error) {
@@ -101,7 +132,7 @@ const getAllResults = async (req, res) => {
 
     const results = await Result.find()
       .populate('student', 'name email')
-      .populate('exam', 'title')
+      .populate('exam', 'title topics')
       .sort({ completedAt: -1 });
     
     res.json(results);
@@ -144,7 +175,8 @@ const getExamStats = async (req, res) => {
         totalAttempts: 0,
         averageScore: '0.00',
         highestScore: '0.00',
-        lowestScore: '0.00'
+        lowestScore: '0.00',
+        topicWiseAnalysis: []
       });
     }
 
@@ -153,15 +185,63 @@ const getExamStats = async (req, res) => {
     const highestScore = Math.max(...results.map(r => r.percentage));
     const lowestScore = Math.min(...results.map(r => r.percentage));
 
+    // Topic-wise analysis
+    const topicWiseAnalysis = [];
+    
+    if (results[0].topicWiseScores && results[0].topicWiseScores.length > 0) {
+      const topicStats = {};
+      
+      // Aggregate topic-wise scores
+      results.forEach(result => {
+        if (result.topicWiseScores) {
+          result.topicWiseScores.forEach(topic => {
+            if (!topicStats[topic.topicName]) {
+              topicStats[topic.topicName] = {
+                topicName: topic.topicName,
+                totalPercentage: 0,
+                totalScore: 0,
+                totalQuestions: 0,
+                count: 0
+              };
+            }
+            topicStats[topic.topicName].totalPercentage += topic.percentage;
+            topicStats[topic.topicName].totalScore += topic.score;
+            topicStats[topic.topicName].totalQuestions += topic.totalQuestions;
+            topicStats[topic.topicName].count++;
+          });
+        }
+      });
+
+      // Calculate averages
+      Object.values(topicStats).forEach(stat => {
+        topicWiseAnalysis.push({
+          topicName: stat.topicName,
+          averagePercentage: (stat.totalPercentage / stat.count).toFixed(2),
+          totalAttempts: stat.count,
+          totalScore: stat.totalScore,
+          totalQuestions: stat.totalQuestions,
+          averageScore: (stat.totalScore / stat.count).toFixed(2)
+        });
+      });
+    }
+
     res.json({
       totalAttempts,
       averageScore: averageScore.toFixed(2),
       highestScore: highestScore.toFixed(2),
-      lowestScore: lowestScore.toFixed(2)
+      lowestScore: lowestScore.toFixed(2),
+      topicWiseAnalysis
     });
   } catch (error) {
+    console.error('Error fetching exam stats:', error);
     res.status(500).json({ message: error.message });
   }
 };
 
-module.exports = { uploadExam, getAllStudents, getAllResults, deleteExam, getExamStats };
+module.exports = { 
+  uploadExam, 
+  getAllStudents, 
+  getAllResults, 
+  deleteExam, 
+  getExamStats 
+};
