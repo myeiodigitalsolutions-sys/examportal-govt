@@ -1,6 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -16,9 +17,12 @@ const adminRoutes = require('./routes/adminRoutes');
 const examRoutes = require('./routes/examRoutes');
 const resultRoutes = require('./routes/resultRoutes');
 
+// Serve static files from uploads directory - FIXED: Properly configure static serving
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
 // Routes - Order matters! Put specific routes before generic ones
 app.use('/api/auth', authRoutes);
-app.use('/api/admin', adminRoutes);  // Make sure this is present
+app.use('/api/admin', adminRoutes);
 app.use('/api', examRoutes);
 app.use('/api', resultRoutes);
 
@@ -53,6 +57,7 @@ app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔗 Test admin routes: http://localhost:${PORT}/api/admin/ping`);
+  console.log(`📁 Uploads directory: ${path.join(__dirname, 'uploads')}`);
 });
 
 module.exports = app;

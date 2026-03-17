@@ -2,6 +2,8 @@ const User = require('../models/User');
 const Exam = require('../models/Exam');
 const Result = require('../models/Result');
 const xlsx = require('xlsx');
+const fs = require('fs');
+const path = require('path');
 
 const uploadExam = async (req, res) => {
   try {
@@ -56,11 +58,12 @@ const uploadExam = async (req, res) => {
 
         return {
           question: String(question).trim(),
+          questionType: 'text',
           options: [
-            String(option1).trim(),
-            String(option2).trim(),
-            String(option3).trim(),
-            String(option4).trim()
+            { text: String(option1).trim(), type: 'text' },
+            { text: String(option2).trim(), type: 'text' },
+            { text: String(option3).trim(), type: 'text' },
+            { text: String(option4).trim(), type: 'text' }
           ],
           correctOption: correctOption - 1 // Convert to 0-based index
         };
@@ -83,7 +86,8 @@ const uploadExam = async (req, res) => {
       description,
       duration: parseInt(duration),
       topics,
-      createdBy: req.user.id
+      createdBy: req.user.id,
+      examType: 'excel'
     });
 
     await exam.save();
@@ -132,7 +136,7 @@ const getAllResults = async (req, res) => {
 
     const results = await Result.find()
       .populate('student', 'name email')
-      .populate('exam', 'title topics')
+      .populate('exam', 'title topics examType')
       .sort({ completedAt: -1 });
     
     res.json(results);
